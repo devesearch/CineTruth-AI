@@ -1,23 +1,20 @@
-# requirments
+# CineTruth AI
 
- streamlit </br>
- pandas </br>
- plotly </br>
- Pillow </br>
- opencv-python </br>
- numpy </br>
- pytesseract </br>
- SpeechRecognition </br>
- textblob </br>
+## Run
 
-## reqirment file installion
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
 
- pip install -r requirmrequirements.txt
+## Routes
 
-## start
+- `/` - Home
+- `/post-sentiment` - Post Sentiment (existing working analyzer)
+- `/deep-fake-analysis` - Deep-Fake Analysis (Coming Soon)
+- `/about-us` - About Us
+- `/contact-us` - Contact Us
+- `/privacy-policy` - Privacy Policy
+- `/terms-and-conditions` - Terms & Conditions
 
- streamlit run app.py
-
- ## deploy URL
-
- https://truevibes.streamlit.app/
+The existing analyzer modules (`social_media_scraper.py`, `sentiment_analyzer.py`, `media_analyzer.py`, `utils.py`) were kept unchanged.

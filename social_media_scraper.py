@@ -132,60 +132,112 @@ def fetch_facebook_content(url):
 def fetch_reddit_content(url):
     """
     Extract content from a Reddit post.
-    Note: This function uses the Reddit API to get post content.
-    
+    Keeps the original working flow first (trafilatura), and only uses
+    a safer fallback for Reddit share URLs when that first method fails.
+
     Args:
         url (str): The URL of the Reddit post
-        
+
     Returns:
         str: The text content of the post
     """
     try:
         # Parse the URL to extract post ID
         parsed_url = urlparse(url)
-        
+
         # Check if it's a Reddit URL
         if "reddit.com" not in parsed_url.netloc:
             return "Not a valid Reddit URL"
-        
-        # First try using trafilatura
+
+        # ORIGINAL WORKING LOGIC: always try trafilatura first.
         downloaded = trafilatura.fetch_url(url)
-        
+
         if downloaded:
             content = trafilatura.extract(downloaded)
-            
+
             if content:
                 return content
-        
-        # If trafilatura fails, try to parse the URL to get a JSON response
-        # Convert the URL to a .json URL
-        if url.endswith('/'):
-            json_url = f"{url}.json"
-        else:
-            json_url = f"{url}/.json"
-        
-        response = requests.get(
-            json_url,
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        )
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            # Extract post data
-            if isinstance(data, list) and len(data) > 0:
-                post_data = data[0]['data']['children'][0]['data']
-                title = post_data.get('title', '')
-                selftext = post_data.get('selftext', '')
-                
-                if selftext:
-                    return f"{title}\n\n{selftext}"
-                else:
-                    return title
-        
+
+        # Only if the original method failed, resolve Reddit /s/... share URLs
+        # to their canonical /comments/... URL before requesting JSON.
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                          'AppleWebKit/537.36 (KHTML, like Gecko) '
+                          'Chrome/131.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+
+        resolved_url = url
+        try:
+            redirect_response = requests.get(
+                url,
+                headers=headers,
+                timeout=12,
+                allow_redirects=True,
+            )
+            if redirect_response.url:
+                resolved_url = redirect_response.url
+        except requests.RequestException:
+            # Keep the original URL if Reddit resets the redirect request.
+            pass
+
+        # Remove query params/fragments before adding .json.
+        resolved_url = resolved_url.split('#', 1)[0].split('?', 1)[0]
+        resolved_url = resolved_url.rstrip('/')
+        json_url = f"{resolved_url}.json"
+
+        try:
+            response = requests.get(
+                json_url,
+                headers={**headers, 'Accept': 'application/json,text/plain,*/*'},
+                timeout=12,
+                allow_redirects=True,
+            )
+
+            if response.status_code == 200:
+                # Reddit sometimes returns HTML with status 200. Parse JSON only
+                # when the response actually looks like JSON.
+                raw = response.text.lstrip()
+                content_type = response.headers.get('content-type', '').lower()
+
+                if 'json' in content_type or raw.startswith('[') or raw.startswith('{'):
+                    try:
+                        data = response.json()
+                    except ValueError:
+                        data = None
+
+                    if isinstance(data, list) and data:
+                        children = data[0].get('data', {}).get('children', [])
+                        if children:
+                            post_data = children[0].get('data', {})
+                            title = post_data.get('title', '') or ''
+                            selftext = post_data.get('selftext', '') or ''
+
+                            if title or selftext:
+                                return f"{title}\n\n{selftext}".strip()
+        except requests.RequestException:
+            pass
+
+        # Final lightweight fallback: fetch the resolved public page and let
+        # the same trafilatura extractor process its HTML.
+        try:
+            html_response = requests.get(
+                resolved_url,
+                headers=headers,
+                timeout=12,
+                allow_redirects=True,
+            )
+            if html_response.status_code == 200 and html_response.text:
+                content = trafilatura.extract(html_response.text)
+                if content:
+                    return content
+        except requests.RequestException:
+            pass
+
         st.warning("Limited Reddit content was extracted. For better results, consider using the Reddit API.")
         return "Could not extract complete content from Reddit. Try pasting the post text directly."
-    
+
     except Exception as e:
         st.error(f"Error fetching Reddit content: {str(e)}")
         return None
+

@@ -4,7 +4,10 @@ plotly
 Pillow
 numpy
 pytesseract
-SpeechRecognition
+SpeechRecognition>=3.17.0
 textblob
 trafilatura
 opencv-python-headless
+
+imageio-ffmpeg
+audioop-lts; python_version >= '3.13'
