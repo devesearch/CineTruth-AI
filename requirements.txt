@@ -1,13 +1,23 @@
-streamlit
-pandas
-plotly
-Pillow
-numpy
-pytesseract
-SpeechRecognition>=3.17.0
-textblob
-trafilatura
-opencv-python-headless
+# Web Framework & Interface
+streamlit>=1.35.0
+plotly>=5.20.0
 
-imageio-ffmpeg
-audioop-lts; python_version >= '3.13'
+# Core AI Engine (Google Gemini Official SDK)
+google-genai>=0.1.0
+
+# Partner Track (ClickHouse DB Integration)
+clickhouse-connect>=0.7.0
+
+# Face Matching & Computer Vision
+opencv-python-headless>=4.9.0
+mediapipe>=0.10.11
+
+# Audio Analysis & Signal Processing
+librosa>=0.10.1
+
+# Data & Environment Helpers
+numpy>=1.26.0
+pandas>=2.2.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+pydantic>=2.7.0

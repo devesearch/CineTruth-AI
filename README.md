@@ -1,20 +1,19 @@
-# CineTruth AI
+# CineTruth-AI
+
+A simple Streamlit application starter for the CineTruth AI project.
+
+## Setup
+
+```bash
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
 
 ## Run
 
 ```bash
-pip install -r requirements.txt
-streamlit run app.py
+.venv\Scripts\streamlit.exe run app.py
 ```
 
-## Routes
-
-- `/` - Home
-- `/post-sentiment` - Post Sentiment (existing working analyzer)
-- `/deep-fake-analysis` - Deep-Fake Analysis (Coming Soon)
-- `/about-us` - About Us
-- `/contact-us` - Contact Us
-- `/privacy-policy` - Privacy Policy
-- `/terms-and-conditions` - Terms & Conditions
-
-The existing analyzer modules (`social_media_scraper.py`, `sentiment_analyzer.py`, `media_analyzer.py`, `utils.py`) were kept unchanged.
+Then open the local URL shown in the terminal.
