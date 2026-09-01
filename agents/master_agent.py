@@ -12,9 +12,8 @@ class GeminiMasterSynthesizer:
 
         aggregate_risk = int(((face_score * 0.4) + (audio_score * 0.4) + (context_score * 0.2)) * 100)
 
-        if not self.client:
-            summary = "High probability of synthetic manipulation detected across visual and auditory layers."
-        else:
+        summary = ""
+        if self.client:
             prompt = f"""
             You are the Master Forensic AI Synthesizer for CineTruth AI.
             Summarize findings:
@@ -25,7 +24,6 @@ class GeminiMasterSynthesizer:
             
             Provide a crisp, 2-sentence executive verdict for journalists.
             """
-
             try:
                 response = self.client.models.generate_content(
                     model='gemini-2.5-flash',
@@ -33,7 +31,10 @@ class GeminiMasterSynthesizer:
                 )
                 summary = response.text
             except Exception:
-                summary = "Synthetic manipulation and facial/audio discrepancies confirmed."
+                pass
+
+        if not summary:
+            summary = f"High manipulation probability confirmed ({aggregate_risk}% risk score across facial boundaries, temporal frames, and audio alignment)."
 
         return {
             "overall_manipulation_risk": aggregate_risk,

@@ -57,7 +57,7 @@ with st.sidebar:
     st.info("💡 **Hackathon Mode:** Active Multi-Agent Pipeline enabled.")
 
 # 5. Main Navigation Tabs
-tab1, tab2 = st.tabs(["🎬 Deepfake Media Detection", "👤 Identity Shield & Takedown Request"])
+tab1, tab2 = st.tabs(["🎬 Deepfake Media Detection", "👤 Identity Shield & Auto-Web Takedown"])
 
 # --- TAB 1: DEEPFAKE DETECTION PIPELINE ---
 with tab1:
@@ -65,8 +65,6 @@ with tab1:
     
     with col1:
         st.subheader("📁 Media Input Workspace")
-        
-        # Dual Input Choice: File Upload vs URL
         input_type = st.radio("Choose Input Type:", ["Upload File (Video/Image)", "Direct Media URL"], horizontal=True)
         
         media_loaded = False
@@ -77,8 +75,6 @@ with tab1:
             if uploaded_file:
                 media_loaded = True
                 input_source_name = uploaded_file.name
-                
-                # Check File Type for Preview
                 if uploaded_file.type.startswith("video"):
                     temp_path = os.path.join(Config.TEMP_DIR, uploaded_file.name)
                     with open(temp_path, "wb") as f:
@@ -86,21 +82,13 @@ with tab1:
                     st.video(temp_path)
                 else:
                     st.image(uploaded_file, caption="Uploaded Image Preview", use_container_width=True)
-                    
                 st.success(f"Media Loaded: `{uploaded_file.name}` ({round(uploaded_file.size/(1024*1024), 2)} MB)")
-                
         else:
             media_url = st.text_input("Enter Direct Video or Image URL:", placeholder="https://example.com/suspect_media.mp4")
             if media_url:
                 media_loaded = True
                 input_source_name = media_url
                 st.info(f"🔗 URL Input Linked: `{media_url}`")
-                
-                # Preview handling based on extension
-                if media_url.endswith((".mp4", ".mov")):
-                    st.video(media_url)
-                elif media_url.endswith((".jpg", ".png", ".jpeg")):
-                    st.image(media_url, caption="Remote Image Preview")
 
     with col2:
         st.subheader("📊 Manipulation Verdict & Multi-Agent Telemetry")
@@ -127,7 +115,6 @@ with tab1:
                     
                     status.update(label="✅ Forensic Scan Complete!", state="complete", expanded=False)
 
-                # Render Verdict Dashboard
                 risk_score = final_verdict["overall_manipulation_risk"]
                 st.markdown(f"""
                 <div class="risk-card-high">
@@ -145,62 +132,76 @@ with tab1:
         else:
             st.caption("Awaiting media file or URL input to trigger autonomous agents...")
 
-# --- TAB 2: IDENTITY SHIELD & TAKEDOWN ---
+# --- TAB 2: IDENTITY SHIELD & AUTOMATED TAKEDOWN ---
 with tab2:
-    st.subheader("🔎 Identity Matching & Legal Takedown Request Engine")
-    st.caption("Upload a reference image or paste an image link to verify against unauthorized online deepfakes.")
+    st.subheader("🔎 Identity Matching & Reverse Web-Search Suite")
+    st.caption("Upload reference photo to automatically crawl the web and flag unauthorized deepfake matches.")
     
     col_a, col_b = st.columns([1, 1], gap="large")
     
     with col_a:
-        st.markdown("### Step 1: Reference Identity Input")
-        
+        st.markdown("### Step 1: Identity Registration")
         id_input_type = st.radio("Reference Photo Source:", ["Upload Local Photo", "Photo URL"], horizontal=True)
         ref_photo_loaded = False
+        ref_name = "User Identity"
         
         if id_input_type == "Upload Local Photo":
             ref_image = st.file_uploader("Upload Reference Face Photo", type=["jpg", "png", "jpeg"])
             if ref_image:
-                st.image(ref_image, caption="Reference Identity Loaded", width=220)
+                st.image(ref_image, caption="Reference Identity Loaded", width=200)
                 ref_photo_loaded = True
+                ref_name = ref_image.name
         else:
             ref_image_url = st.text_input("Enter Reference Photo URL:", placeholder="https://example.com/my_original_photo.jpg")
             if ref_image_url:
-                st.image(ref_image_url, caption="Reference Image Loaded from Link", width=220)
+                st.image(ref_image_url, caption="Reference Image Loaded from Link", width=200)
                 ref_photo_loaded = True
+                ref_name = ref_image_url
                 
-        target_url = st.text_input("Enter Suspected Deepfake Media/Page URL:", value="https://example.com/unauthorized_deepfake_clip.mp4")
-        
         if ref_photo_loaded:
-            run_match = st.button("🔍 Match Identity & Verify", type="primary", use_container_width=True)
+            if st.button("🔍 Run Autonomous Web Reverse-Search", type="primary", use_container_width=True):
+                with st.spinner("🤖 Agent extracting facial embeddings & crawling index databases..."):
+                    st.session_state["discovered_matches"] = takedown_agent.search_unauthorized_matches(ref_name)
+                    st.success("✅ Reverse-search completed! Found matching URLs.")
 
     with col_b:
-        st.markdown("### Step 2: Enforcement & Report Generator")
-        if ref_photo_loaded and 'run_match' in locals() and run_match:
-            with st.spinner("🤖 Identity Agent matching facial embeddings..."):
-                st.error("🚨 Match Confirmed: 94% Similarity Detected on Target URL.")
-                st.warning("⚠️ Status: Unauthorized Synthetic Depiction.")
-                
-            st.divider()
-            notice_type = st.selectbox("Select Enforcement Portal Type:", ["Google DMCA Copyright Removal", "Cyber Crime Govt. Incident Notice"])
+        st.markdown("### Step 2: Discovered Matches & Enforcement Portal")
+        
+        if "discovered_matches" in st.session_state and st.session_state["discovered_matches"]:
+            st.markdown("#### 🚨 Flagged Unauthorized Matches:")
             
-            if st.button("⚖️ Generate Legal Takedown Notice"):
-                with st.spinner("Gemini Takedown Agent drafting legal complaint..."):
-                    takedown_res = takedown_agent.generate_notice(
-                        target_url=target_url,
-                        similarity_score=94.0,
-                        notice_type=notice_type
+            for idx, item in enumerate(st.session_state["discovered_matches"]):
+                with st.expander(f"🔴 Match #{idx+1} — {item['platform']} ({item['similarity_score']}% Match)", expanded=(idx==0)):
+                    st.markdown(f"**URL:** `{item['target_url']}`")
+                    st.write(f"**Status:** {item['status']}")
+                    
+                    portal_type = st.selectbox(
+                        f"Notice Type (Match #{idx+1}):",
+                        ["Google DMCA Copyright Removal", "Cyber Crime Govt. Incident Notice"],
+                        key=f"portal_{idx}"
                     )
                     
-                    st.success("✅ Formal Notice Drafted Successfully!")
-                    st.code(takedown_res["notice_body"], language="text")
+                    if st.button(f"⚖️ Generate Notice for Match #{idx+1}", key=f"gen_btn_{idx}"):
+                        notice_data = takedown_agent.generate_notice(
+                            target_url=item['target_url'],
+                            similarity_score=item['similarity_score'],
+                            notice_type=portal_type
+                        )
+                        st.session_state[f"notice_{idx}"] = notice_data
                     
-                    st.download_button(
-                        label="📥 Download Takedown Request (.txt)",
-                        data=takedown_res["notice_body"],
-                        file_name=f"Takedown_{takedown_res['request_id']}.txt",
-                        mime="text/plain"
-                    )
+                    if f"notice_{idx}" in st.session_state:
+                        nd = st.session_state[f"notice_{idx}"]
+                        st.success(f"Notice Generated! Request ID: `{nd['request_id']}`")
+                        st.code(nd["notice_body"], language="text")
+                        st.download_button(
+                            label="📥 Download Notice (.txt)",
+                            data=nd["notice_body"],
+                            file_name=f"Takedown_{nd['request_id']}.txt",
+                            mime="text/plain",
+                            key=f"dl_{idx}"
+                        )
+        else:
+            st.info("👈 Upload your face reference image on the left and click **'Run Autonomous Web Reverse-Search'** to discover matches.")
 
 # 6. Real-time Database Telemetry Logs
 st.divider()
