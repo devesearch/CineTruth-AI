@@ -11,7 +11,7 @@ from agents.face_agent import FaceConsistencyAgent
 from agents.audio_agent import AudioManipulationAgent
 from agents.context_agent import ContextVerificationAgent
 from agents.master_agent import GeminiMasterSynthesizer
-from agents.takedown_agent import TakedownAgent
+from agents.takedown_agent import takedown_agent, TakedownAgent
 
 # 1. Page Config
 st.set_page_config(
@@ -34,7 +34,6 @@ face_agent = FaceConsistencyAgent()
 audio_agent = AudioManipulationAgent()
 context_agent = ContextVerificationAgent()
 master_synthesizer = GeminiMasterSynthesizer()
-takedown_agent = TakedownAgent()
 
 # 3. Header Banner
 st.markdown("""
@@ -47,8 +46,8 @@ st.markdown("""
 # 4. Sidebar Status & Configs
 with st.sidebar:
     st.header("⚙️ System Telemetry")
-    gemini_status = "🟢 Connected" if Config.GEMINI_API_KEY else "🔴 Missing API Key"
-    ch_status = "🟢 Connected" if db_manager.client else "🔴 Offline"
+    gemini_status = "🟢 Connected" if getattr(Config, 'GEMINI_API_KEY', None) else "🔴 Missing API Key"
+    ch_status = "🟢 Connected" if getattr(db_manager, 'client', None) else "🔴 Offline"
     
     st.caption(f"**Gemini 2.5 Engine:** {gemini_status}")
     st.caption(f"**ClickHouse DB (Partner):** {ch_status}")
@@ -76,7 +75,8 @@ with tab1:
                 media_loaded = True
                 input_source_name = uploaded_file.name
                 if uploaded_file.type.startswith("video"):
-                    temp_path = os.path.join(Config.TEMP_DIR, uploaded_file.name)
+                    temp_path = os.path.join(getattr(Config, 'TEMP_DIR', '.'), uploaded_file.name)
+                    os.makedirs(os.path.dirname(temp_path), exist_ok=True)
                     with open(temp_path, "wb") as f:
                         f.write(uploaded_file.getbuffer())
                     st.video(temp_path)
@@ -115,20 +115,20 @@ with tab1:
                     
                     status.update(label="✅ Forensic Scan Complete!", state="complete", expanded=False)
 
-                risk_score = final_verdict["overall_manipulation_risk"]
+                risk_score = final_verdict.get("overall_manipulation_risk", 0)
                 st.markdown(f"""
                 <div class="risk-card-high">
                     <div style="font-weight: 600; color: #f43f5e; font-size: 1.1rem;">MANIPULATION RISK SCORE</div>
                     <div class="risk-score-text">{risk_score}%</div>
-                    <div style="color: #fda4af; font-size: 0.9rem;">{final_verdict['executive_summary']}</div>
+                    <div style="color: #fda4af; font-size: 0.9rem;">{final_verdict.get('executive_summary', 'Scan Finished')}</div>
                 </div>
                 """, unsafe_allow_html=True)
                 
                 st.write("")
                 st.markdown("### ⚠️ Detailed Findings:")
-                st.error(f"❌ **Face Boundary:** {face_res['details']}")
-                st.warning(f"⚠️ **Audio Mismatch:** {audio_res['details']}")
-                st.info(f"🌐 **Context Scan:** {context_res['details']}")
+                st.error(f"❌ **Face Boundary:** {face_res.get('details', 'N/A')}")
+                st.warning(f"⚠️ **Audio Mismatch:** {audio_res.get('details', 'N/A')}")
+                st.info(f"🌐 **Context Scan:** {context_res.get('details', 'N/A')}")
         else:
             st.caption("Awaiting media file or URL input to trigger autonomous agents...")
 
@@ -143,25 +143,25 @@ with tab2:
         st.markdown("### Step 1: Identity Registration")
         id_input_type = st.radio("Reference Photo Source:", ["Upload Local Photo", "Photo URL"], horizontal=True)
         ref_photo_loaded = False
-        ref_name = "User Identity"
+        ref_payload = "User Identity"
         
         if id_input_type == "Upload Local Photo":
             ref_image = st.file_uploader("Upload Reference Face Photo", type=["jpg", "png", "jpeg"])
             if ref_image:
                 st.image(ref_image, caption="Reference Identity Loaded", width=200)
                 ref_photo_loaded = True
-                ref_name = ref_image.name
+                ref_payload = ref_image  # File object for direct image search & temporary hosting
         else:
             ref_image_url = st.text_input("Enter Reference Photo URL:", placeholder="https://example.com/my_original_photo.jpg")
             if ref_image_url:
                 st.image(ref_image_url, caption="Reference Image Loaded from Link", width=200)
                 ref_photo_loaded = True
-                ref_name = ref_image_url
+                ref_payload = ref_image_url
                 
         if ref_photo_loaded:
             if st.button("🔍 Run Autonomous Web Reverse-Search", type="primary", use_container_width=True):
                 with st.spinner("🤖 Agent extracting facial embeddings & crawling index databases..."):
-                    st.session_state["discovered_matches"] = takedown_agent.search_unauthorized_matches(ref_name)
+                    st.session_state["discovered_matches"] = takedown_agent.search_unauthorized_matches(ref_payload)
                     st.success("✅ Reverse-search completed! Found matching URLs.")
 
     with col_b:
@@ -172,8 +172,17 @@ with tab2:
             
             for idx, item in enumerate(st.session_state["discovered_matches"]):
                 with st.expander(f"🔴 Match #{idx+1} — {item['platform']} ({item['similarity_score']}% Match)", expanded=(idx==0)):
-                    st.markdown(f"**URL:** `{item['target_url']}`")
-                    st.write(f"**Status:** {item['status']}")
+                    
+                    # 1. Page URL
+                    st.markdown(f"**🌐 Web Page URL:** [{item['target_url']}]({item['target_url']})")
+                    
+                    # 2. Direct Matched Image URL (NEW)
+                    matched_img_url = item.get("matched_image_url") or item.get("thumbnail")
+                    if matched_img_url:
+                        st.markdown(f"**🖼️ Matched Image Direct URL:** [{matched_img_url}]({matched_img_url})")
+                        st.image(matched_img_url, caption="Matched Visual Content Found on Web", width=220)
+
+                    st.write(f"**Status:** `{item['status']}`")
                     
                     portal_type = st.selectbox(
                         f"Notice Type (Match #{idx+1}):",
@@ -202,12 +211,11 @@ with tab2:
                         )
         else:
             st.info("👈 Upload your face reference image on the left and click **'Run Autonomous Web Reverse-Search'** to discover matches.")
-
 # 6. Real-time Database Telemetry Logs
 st.divider()
 with st.expander("🛠️ View Real-Time ClickHouse Cloud Telemetry & Agent Logs"):
     st.json({
-        "clickhouse_connection": "ACTIVE",
-        "database_target": Config.CLICKHOUSE_HOST,
+        "clickhouse_connection": "ACTIVE" if getattr(db_manager, 'client', None) else "SIMULATION_MODE",
+        "database_target": getattr(Config, 'CLICKHOUSE_HOST', 'localhost'),
         "supported_tables": ["detection_telemetry", "identity_takedowns"]
     })
