@@ -4,6 +4,7 @@ import logging
 import os
 import uuid
 
+from database.clickhouse_db import db_manager
 from agents.audio_agent import AudioManipulationAgent
 from agents.context_agent import ContextVerificationAgent
 from agents.face_agent import FaceConsistencyAgent
@@ -38,6 +39,7 @@ class Pipeline:
 
         source_label = source_label or os.path.basename(media_path)
         session_id = session_id or f"session_{uuid.uuid4().hex[:8]}"
+        scan_id = str(uuid.uuid4())
         ext = os.path.splitext(media_path)[1].lower()
         media_type = "video" if ext in self.VIDEO_EXTENSIONS else "image"
 
@@ -84,7 +86,39 @@ class Pipeline:
         }
         final_verdict = self.master_agent.synthesize_verdict(agent_outputs)
 
+        # Save scan result to ClickHouse
+        try:
+            risk_score = float(
+                final_verdict.get("overall_manipulation_risk", 0)
+            )
+
+            if risk_score >= 70:
+                verdict = "DEEPFAKE"
+            elif risk_score >= 40:
+                verdict = "MANIPULATED"
+            else:
+                verdict = "AUTHENTIC"
+
+            input_type = (
+                "URL"
+                if source_label.startswith(("http://", "https://"))
+                else "FILE_UPLOAD"
+            )
+
+            db_manager.save_scan(
+                scan_id=scan_id,
+                input_type=input_type,
+                source_path=source_label,
+                media_type=media_type,
+                verdict=verdict,
+                confidence_score=risk_score / 100,
+            )
+
+        except Exception as exc:
+            logger.warning(f"Could not save scan to ClickHouse: {exc}")
+
         return {
+            "scan_id": scan_id,
             "session_id": session_id,
             "source": source_label,
             "media_path": media_path,
