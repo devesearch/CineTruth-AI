@@ -11,6 +11,7 @@ from agents.frame_agent import FrameAgent
 from agents.master_agent import GeminiMasterSynthesizer
 from agents.metadata_agent import MetadataAgent
 from config import Config
+from database.clickhouse_db import db_manager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 class Pipeline:
     """Existing project orchestrator: media -> agents -> master verdict."""
 
-    VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+    VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
 
     def __init__(self):
         self.frame_agent = FrameAgent(seconds_interval=2, max_frames=8)
@@ -42,7 +43,6 @@ class Pipeline:
         media_type = "video" if ext in self.VIDEO_EXTENSIONS else "image"
 
         logger.info("Starting CineTruth pipeline for %s", source_label)
-
         metadata = self.metadata_agent.extract_metadata(media_path)
 
         frame_paths = []
@@ -50,39 +50,72 @@ class Pipeline:
             frame_dir = os.path.join(Config.TEMP_DIR, f"frames_{session_id}")
             frame_paths = self.frame_agent.extract_frames(media_path, output_dir=frame_dir)
 
-        # For videos use representative frames for visual analysis when available.
-        face_result = self.face_agent.analyze_faces(
-            session_id=session_id,
-            input_source=media_path,
-            frame_paths=frame_paths or None,
-            source_label=source_label,
-        )
+        # Free-tier/local testing mode: ONE Gemini request returns the three
+        # logical agent findings. Local metadata/frame extraction still runs.
+        if Config.GEMINI_PIPELINE_MODE != "full":
+            bundled = self.master_agent.analyze_media_bundle(
+                media_path=media_path,
+                source_label=source_label,
+                metadata=metadata,
+                media_type=media_type,
+            )
+            agent_outputs = bundled["agents"]
+            final_verdict = bundled["final_verdict"]
 
-        audio_result = self.audio_agent.analyze_audio(
-            session_id=session_id,
-            input_source=media_path,
-            source_label=source_label,
-        )
+            # Preserve per-agent telemetry even though efficient mode uses one
+            # shared Gemini model request. ClickHouse remains a safe no-op when
+            # it is not configured.
+            for agent_result in agent_outputs.values():
+                score = agent_result.get("anomaly_score", agent_result.get("risk_score", 0.0))
+                db_manager.log_agent_execution(
+                    session_id=session_id,
+                    agent_name=agent_result.get("agent", "Unknown Agent"),
+                    anomaly_score=score or 0.0,
+                    status=agent_result.get("status", "UNKNOWN"),
+                    details=agent_result.get("details", ""),
+                )
+        else:
+            # Full multi-agent mode keeps the original independent model calls.
+            # Use this only when the API project has sufficient quota.
+            face_result = self.face_agent.analyze_faces(
+                session_id=session_id,
+                input_source=media_path,
+                frame_paths=frame_paths or None,
+                source_label=source_label,
+            )
 
-        evidence_summary = json.dumps(
-            {
-                "source": source_label,
-                "media_type": media_type,
-                "metadata": metadata,
-                "visual_finding": face_result,
-                "audio_finding": audio_result,
-            },
-            indent=2,
-            default=str,
-        )
-        context_result = self.context_agent.verify_context(session_id, evidence_summary)
+            audio_result = self.audio_agent.analyze_audio(
+                session_id=session_id,
+                input_source=media_path,
+                source_label=source_label,
+            )
 
-        agent_outputs = {
-            "face_agent": face_result,
-            "audio_agent": audio_result,
-            "context_agent": context_result,
-        }
-        final_verdict = self.master_agent.synthesize_verdict(agent_outputs)
+            evidence_summary = json.dumps(
+                {
+                    "source": source_label,
+                    "media_type": media_type,
+                    "metadata": metadata,
+                    "visual_finding": face_result,
+                    "audio_finding": audio_result,
+                },
+                indent=2,
+                default=str,
+            )
+            context_result = self.context_agent.verify_context(session_id, evidence_summary)
+
+            agent_outputs = {
+                "face_agent": face_result,
+                "audio_agent": audio_result,
+                "context_agent": context_result,
+            }
+            # master synthesis is local now, so even full mode saves one request.
+            final_verdict = self.master_agent.synthesize_verdict(agent_outputs)
+            final_verdict["status"] = "COMPLETED" if any(
+                item.get("status") == "COMPLETED" for item in agent_outputs.values()
+            ) else "ERROR"
+            final_verdict["gemini_requests_used"] = sum(
+                1 for item in agent_outputs.values() if item.get("status") in {"COMPLETED", "ERROR"}
+            )
 
         return {
             "session_id": session_id,
@@ -92,6 +125,7 @@ class Pipeline:
             "metadata": metadata,
             "frames_sampled": len(frame_paths),
             "frame_paths": frame_paths,
+            "pipeline_mode": Config.GEMINI_PIPELINE_MODE,
             "agents": agent_outputs,
             "final_verdict": final_verdict,
         }
