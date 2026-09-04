@@ -8,6 +8,8 @@ class Config:
     # Gemini
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
+    # efficient = one Gemini generate_content request per scan; full = legacy multi-call pipeline
+    GEMINI_PIPELINE_MODE = os.getenv("GEMINI_PIPELINE_MODE", "efficient").strip().lower()
 
     # Reverse image search
     SERP_API_KEY = os.getenv("SERP_API_KEY", "").strip()

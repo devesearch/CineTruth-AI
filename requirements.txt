@@ -42,3 +42,11 @@ python-dotenv>=1.0.1
 
 # Database (ClickHouse integration as used in project)
 clickhouse-connect>=0.7.0
+# Public video-page URL resolver (YouTube/Reddit/etc.)
+yt-dlp
+
+# Bundled FFmpeg fallback for merging YouTube video+audio streams
+imageio-ffmpeg>=0.5.1
+
+# Professional forensic PDF reports
+reportlab>=4.2.0
