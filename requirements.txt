@@ -50,3 +50,4 @@ imageio-ffmpeg>=0.5.1
 
 # Professional forensic PDF reports
 reportlab>=4.2.0
+boto3

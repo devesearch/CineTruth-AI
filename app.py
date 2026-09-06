@@ -1,13 +1,14 @@
 import os
+import shutil
+import tempfile
 import uuid
-from urllib.parse import urlparse
 
-import requests
 import streamlit as st
 
 from config import Config
 from database.clickhouse_db import db_manager
 from main import Pipeline
+from agents.media_storage import media_storage
 from agents.takedown_agent import takedown_agent
 from utils.report_generator import generate_report
 
@@ -25,169 +26,39 @@ def load_css(file_path):
             st.markdown(f"<style>{fh.read()}</style>", unsafe_allow_html=True)
 
 
-def save_uploaded_file(uploaded_file) -> str:
-    safe_name = f"{uuid.uuid4().hex[:8]}_{os.path.basename(uploaded_file.name)}"
-    path = os.path.join(Config.TEMP_DIR, safe_name)
-    with open(path, "wb") as fh:
-        fh.write(uploaded_file.getbuffer())
-    return path
-
-
-def _download_with_ytdlp(url: str) -> str:
-    """Resolve a webpage/video-post URL to a local media file using yt-dlp."""
+def _build_report_bytes(result: dict) -> bytes:
+    """Build a PDF while the temporary processing copy still exists."""
+    fd, report_path = tempfile.mkstemp(prefix="cinetruth_report_", suffix=".pdf")
+    os.close(fd)
     try:
-        import yt_dlp
-    except ImportError as exc:
-        raise RuntimeError(
-            "This URL is a webpage, not a direct media file. Install yt-dlp with: pip install yt-dlp"
-        ) from exc
-
-    token = uuid.uuid4().hex[:10]
-    output_template = os.path.join(Config.TEMP_DIR, f"url_{token}.%(ext)s")
-    max_bytes = 100 * 1024 * 1024
-
-    # Modern YouTube videos often expose video and audio as separate streams.
-    # Let yt-dlp use its default best-video + best-audio selection instead of
-    # forcing a progressive single-file format, which can cause
-    # "Requested format is not available" for otherwise valid videos.
-    ydl_opts = {
-        "outtmpl": output_template,
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "restrictfilenames": True,
-        "max_filesize": max_bytes,
-        "socket_timeout": 40,
-        "retries": 3,
-        "fragment_retries": 3,
-        # Prefer a broadly compatible final container when separate streams
-        # need to be merged. yt-dlp still falls back to the best available
-        # format when a merge is not required.
-        "merge_output_format": "mp4",
-    }
-
-    # Use imageio-ffmpeg's bundled FFmpeg when available. This avoids requiring
-    # a separate system-wide FFmpeg installation on Windows just for URL media.
-    try:
-        import imageio_ffmpeg
-
-        ydl_opts["ffmpeg_location"] = imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        # If system FFmpeg is on PATH, yt-dlp will discover it automatically.
-        pass
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            if not info:
-                raise RuntimeError("No downloadable media was found on this URL.")
-    except Exception as exc:
-        raise RuntimeError(
-            "The URL opened as a webpage, but its video could not be downloaded. "
-            "The site may require login/cookies, block automated downloads, or the post may be private. "
-            f"Details: {exc}"
-        ) from exc
-
-    allowed = {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".webm", ".avi", ".mkv", ".m4v"}
-    candidates = []
-    for name in os.listdir(Config.TEMP_DIR):
-        if not name.startswith(f"url_{token}."):
-            continue
-        path = os.path.join(Config.TEMP_DIR, name)
-        if os.path.isfile(path) and os.path.splitext(path)[1].lower() in allowed:
-            candidates.append(path)
-
-    if not candidates:
-        raise RuntimeError("The page was resolved, but no supported image/video file was produced.")
-
-    # yt-dlp may leave more than one candidate; use the largest actual media file.
-    target = max(candidates, key=os.path.getsize)
-    if os.path.getsize(target) > max_bytes:
+        generate_report(result, report_path)
+        with open(report_path, "rb") as fh:
+            return fh.read()
+    finally:
         try:
-            os.remove(target)
+            os.remove(report_path)
         except OSError:
             pass
-        raise ValueError("Resolved media is larger than the 100 MB test limit.")
-    return target
 
 
-def download_media_url(url: str) -> str:
-    """Download either a direct media URL or a supported webpage/video-post URL."""
-    parsed = urlparse((url or "").strip())
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("Please enter a valid http:// or https:// media URL.")
-
-    response = requests.get(
-        url,
-        timeout=40,
-        stream=True,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0 Safari/537.36"
-            )
-        },
-        allow_redirects=True,
-    )
-    response.raise_for_status()
-
-    content_type = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
-    parsed_path = urlparse(response.url).path
-    ext = os.path.splitext(parsed_path)[1].lower()
-
-    # A YouTube/Reddit/Instagram/X/etc. share link normally returns HTML.
-    # Do not save that HTML as media; resolve the actual video instead.
-    if content_type in {"text/html", "application/xhtml+xml"} or content_type.startswith("text/html"):
-        response.close()
-        return _download_with_ytdlp(url)
-
-    ext_map = {
-        "image/jpeg": ".jpg",
-        "image/png": ".png",
-        "image/webp": ".webp",
-        "video/mp4": ".mp4",
-        "video/quicktime": ".mov",
-        "video/webm": ".webm",
-        "video/x-msvideo": ".avi",
-        "video/x-matroska": ".mkv",
-    }
-    allowed = {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".webm", ".avi", ".mkv", ".m4v"}
-
-    # Prefer the HTTP content type when the URL does not carry a useful extension.
-    if ext not in allowed:
-        ext = ext_map.get(content_type, "")
-
-    if ext not in allowed:
-        response.close()
-        raise ValueError(
-            f"Unsupported media type from URL: {content_type or 'unknown'}. "
-            "Use a direct image/video URL or a supported public video-page URL."
-        )
-
-    target = os.path.join(Config.TEMP_DIR, f"url_{uuid.uuid4().hex[:10]}{ext}")
-    total = 0
-    max_bytes = 100 * 1024 * 1024
-    try:
-        with open(target, "wb") as fh:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if not chunk:
-                    continue
-                total += len(chunk)
-                if total > max_bytes:
-                    raise ValueError("Media URL is larger than the 100 MB test limit.")
-                fh.write(chunk)
-    except Exception:
-        if os.path.exists(target):
+def _cleanup_processing_artifacts(result: dict):
+    """Remove transient frame files/directories created for a scan."""
+    frame_paths = list(result.get("frame_paths") or [])
+    parent_dirs = set()
+    for frame_path in frame_paths:
+        if not frame_path:
+            continue
+        parent_dirs.add(os.path.dirname(frame_path))
+        try:
+            os.remove(frame_path)
+        except OSError:
+            pass
+    for folder in parent_dirs:
+        if folder and os.path.isdir(folder):
             try:
-                os.remove(target)
+                shutil.rmtree(folder)
             except OSError:
                 pass
-        raise
-    finally:
-        response.close()
-
-    return target
 
 
 load_css("assets/style.css")
@@ -209,11 +80,13 @@ with st.sidebar:
     clickhouse_status = "🟢 Connected" if db_manager.client else ("🟡 Not configured" if not db_manager.configured else "🔴 Connection failed")
     serp_status = "🟢 Configured" if Config.SERP_API_KEY else "🔴 Missing"
     imgbb_status = "🟢 Configured" if Config.IMGBB_API_KEY else "🔴 Missing"
+    r2_status = "🟢 Configured" if media_storage.configured else "🔴 Missing configuration"
 
     st.caption(f"**Gemini:** {gemini_status}")
     st.caption(f"**Gemini pipeline:** `{Config.GEMINI_PIPELINE_MODE}`")
     st.caption(f"**SerpAPI:** {serp_status}")
     st.caption(f"**ImgBB:** {imgbb_status}")
+    st.caption(f"**Cloudflare R2:** {r2_status}")
     st.caption(f"**ClickHouse:** {clickhouse_status}")
     st.divider()
     st.info("ClickHouse is optional during local functional testing.")
@@ -244,26 +117,46 @@ with tab1:
                 key="forensic_batch_uploads",
             )
 
-            if uploaded_files:
+            if uploaded_files and not media_storage.configured:
+                st.error(
+                    "Cloudflare R2 is not configured. Add R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, "
+                    "R2_SECRET_ACCESS_KEY and R2_BUCKET_NAME to your .env file."
+                )
+
+            if uploaded_files and media_storage.configured:
                 st.caption(f"{len(uploaded_files)} file(s) selected")
+                upload_cache = st.session_state.setdefault("r2_upload_cache", {})
+
                 for idx, uploaded_file in enumerate(uploaded_files, start=1):
                     try:
-                        local_path = save_uploaded_file(uploaded_file)
+                        file_id = getattr(uploaded_file, "file_id", None)
+                        cache_key = str(file_id or f"{uploaded_file.name}:{uploaded_file.size}")
+                        stored = upload_cache.get(cache_key)
+                        if not stored:
+                            with st.spinner(f"Uploading {uploaded_file.name} to Cloudflare R2..."):
+                                stored = media_storage.upload_streamlit_file(uploaded_file)
+                            upload_cache[cache_key] = stored
+
                         item = {
                             "source_label": uploaded_file.name,
-                            "media_path": local_path,
+                            "storage_key": stored["key"],
+                            "storage_record": stored,
                             "input_kind": "upload",
                         }
                         batch_media_items.append(item)
 
                         with st.expander(f"Preview #{idx}: {uploaded_file.name}", expanded=(idx == 1)):
+                            preview_url = media_storage.get_access_url(stored["key"])
                             if uploaded_file.type and uploaded_file.type.startswith("video"):
-                                st.video(local_path)
+                                st.video(preview_url)
                             else:
-                                st.image(local_path, caption=uploaded_file.name, use_container_width=True)
-                            st.caption(f"Size: {uploaded_file.size/(1024*1024):.2f} MB")
+                                st.image(preview_url, caption=uploaded_file.name, use_container_width=True)
+                            st.caption(
+                                f"Stored in R2 · {stored['size']/(1024*1024):.2f} MB · "
+                                f"`{stored['key']}`"
+                            )
                     except Exception as exc:
-                        st.error(f"Could not save `{uploaded_file.name}`: {exc}")
+                        st.error(f"Could not upload `{uploaded_file.name}` to R2: {exc}")
 
         else:
             urls_text = st.text_area(
@@ -289,53 +182,62 @@ with tab1:
                 st.caption(f"{len(parsed_urls)} unique URL(s) entered")
 
             if st.button(
-                "⬇️ Load All URL Media",
+                "☁️ Resolve & Store All URL Media in R2",
                 use_container_width=True,
-                disabled=not parsed_urls,
+                disabled=not parsed_urls or not media_storage.configured,
                 key="load_batch_urls",
             ):
                 loaded_items = []
                 load_errors = []
-                progress = st.progress(0, text="Resolving media URLs...")
+                progress = st.progress(0, text="Resolving URLs and uploading media to R2...")
 
                 for idx, media_url in enumerate(parsed_urls, start=1):
                     try:
-                        local_path = download_media_url(media_url)
+                        stored = media_storage.ingest_url(media_url)
                         loaded_items.append(
                             {
                                 "source_label": media_url,
-                                "media_path": local_path,
+                                "storage_key": stored["key"],
+                                "storage_record": stored,
                                 "input_kind": "url",
                             }
                         )
                     except Exception as exc:
                         load_errors.append({"source": media_url, "error": str(exc)})
                     finally:
-                        progress.progress(idx / max(len(parsed_urls), 1), text=f"Resolving URL {idx}/{len(parsed_urls)}")
+                        progress.progress(
+                            idx / max(len(parsed_urls), 1),
+                            text=f"Resolving/uploading URL {idx}/{len(parsed_urls)}",
+                        )
 
                 progress.empty()
                 st.session_state["url_media_items"] = loaded_items
                 st.session_state["url_media_errors"] = load_errors
 
+            if parsed_urls and not media_storage.configured:
+                st.error("Configure Cloudflare R2 before loading media URLs.")
+
             stored_url_items = st.session_state.get("url_media_items", [])
             stored_url_errors = st.session_state.get("url_media_errors", [])
 
             for item in stored_url_items:
-                path = item.get("media_path")
-                if path and os.path.exists(path):
+                if item.get("storage_key"):
                     batch_media_items.append(item)
 
             if stored_url_items:
-                st.success(f"Loaded {len(batch_media_items)} URL media item(s).")
+                st.success(f"Stored {len(batch_media_items)} URL media item(s) in Cloudflare R2.")
                 for idx, item in enumerate(batch_media_items, start=1):
-                    path = item["media_path"]
-                    ext = os.path.splitext(path)[1].lower()
+                    stored = item.get("storage_record") or {}
+                    key = item["storage_key"]
+                    ext = os.path.splitext(stored.get("filename") or key)[1].lower()
                     with st.expander(f"URL Media #{idx}", expanded=(idx == 1)):
                         st.caption(item["source_label"])
+                        preview_url = media_storage.get_access_url(key)
                         if ext in {".mp4", ".mov", ".webm", ".avi", ".mkv", ".m4v"}:
-                            st.video(path)
+                            st.video(preview_url)
                         else:
-                            st.image(path, caption="Resolved URL Image", use_container_width=True)
+                            st.image(preview_url, caption="R2 Stored Image", use_container_width=True)
+                        st.caption(f"Cloudflare R2 key: `{key}`")
 
             if stored_url_errors:
                 with st.expander(f"⚠️ URL load errors ({len(stored_url_errors)})"):
@@ -370,7 +272,8 @@ with tab1:
 
                 for idx, item in enumerate(batch_media_items, start=1):
                     source_label = item["source_label"]
-                    local_media_path = item["media_path"]
+                    storage_key = item["storage_key"]
+                    storage_record = item.get("storage_record") or {}
                     session_id = f"session_{uuid.uuid4().hex[:8]}"
 
                     try:
@@ -378,12 +281,38 @@ with tab1:
                             (idx - 1) / max(len(batch_media_items), 1),
                             text=f"Analyzing {idx}/{len(batch_media_items)}: {source_label}",
                         )
-                        result = pipeline.execute(
-                            local_media_path,
-                            source_label=source_label,
-                            session_id=session_id,
-                        )
-                        result["batch_index"] = idx
+
+                        # OpenCV/Gemini currently require a filesystem path, so R2 media is
+                        # downloaded to an OS temporary file only for this analysis. It is
+                        # deleted automatically when this block exits.
+                        with media_storage.local_copy(storage_key) as local_media_path:
+                            result = pipeline.execute(
+                                local_media_path,
+                                source_label=source_label,
+                                session_id=session_id,
+                            )
+                            result["batch_index"] = idx
+                            result["storage"] = {
+                                "provider": "cloudflare_r2",
+                                "bucket": Config.R2_BUCKET_NAME,
+                                "key": storage_key,
+                                "sha256": storage_record.get("sha256"),
+                                "size": storage_record.get("size"),
+                            }
+
+                            # Build the PDF before temporary media/frame files are removed.
+                            # A report failure must not discard an otherwise successful scan.
+                            try:
+                                result["_report_pdf_bytes"] = _build_report_bytes(result)
+                            except Exception as report_exc:
+                                result["_report_pdf_bytes"] = None
+                                result["_report_error"] = str(report_exc)
+                            finally:
+                                _cleanup_processing_artifacts(result)
+
+                        # Never persist the OS temporary path in session state/results.
+                        result["media_path"] = f"r2://{Config.R2_BUCKET_NAME}/{storage_key}"
+                        result["frame_paths"] = []
                         results.append(result)
                     except Exception as exc:
                         errors.append(
@@ -478,15 +407,23 @@ with tab1:
                             }
                         )
 
-                    report_path = os.path.join(Config.TEMP_DIR, f"report_{result['session_id']}.pdf")
-                    generate_report(result, report_path)
-                    with open(report_path, "rb") as fh:
+                    report_bytes = result.get("_report_pdf_bytes")
+                    if result.get("_report_error"):
+                        st.warning(f"PDF report could not be generated: {result['_report_error']}")
+                    if report_bytes:
                         st.download_button(
                             "📥 Download Forensic Report (PDF)",
-                            data=fh.read(),
+                            data=report_bytes,
                             file_name=f"CineTruth_Forensic_{result['session_id']}.pdf",
                             mime="application/pdf",
                             key=f"report_{result['session_id']}",
+                        )
+
+                    storage_info = result.get("storage") or {}
+                    if storage_info.get("key"):
+                        st.caption(
+                            f"Permanent media storage: Cloudflare R2 · "
+                            f"`{storage_info.get('bucket')}/{storage_info.get('key')}`"
                         )
 
         if batch_errors:
