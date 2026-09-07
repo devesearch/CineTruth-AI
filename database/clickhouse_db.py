@@ -1,4 +1,8 @@
+import logging
 import uuid
+
+from config import Config
+logger = logging.getLogger(__name__)
 
 try:
     import clickhouse_connect
@@ -265,6 +269,41 @@ class ClickHouseManager:
                 ],
             )
 
+            return True
+
+        except Exception as exc:
+            print(f"[ClickHouse Takedown Error] {exc}")
+            return False
+
+    def log_takedown_request(
+        self,
+        request_id,
+        target_url,
+        similarity_score,
+        notice_type,
+        action_status="PENDING",
+    ):
+        """Compatibility method for the existing takedown agent."""
+        try:
+            self.client.insert(
+                "takedown_requests",
+                [[
+                    str(request_id),
+                    None,
+                    notice_type or "UNKNOWN",
+                    target_url,
+                    action_status or "PENDING",
+                ]],
+                column_names=[
+                    "request_id",
+                    "scan_id",
+                    "platform",
+                    "target_url",
+                    "status",
+                ],
+            )
+
+            print("[ClickHouse] Takedown request logged successfully.")
             return True
 
         except Exception as exc:
