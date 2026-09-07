@@ -4,6 +4,7 @@ import tempfile
 import uuid
 
 import streamlit as st
+import plotly.graph_objects as go
 
 from config import Config
 from database.clickhouse_db import db_manager
@@ -59,6 +60,93 @@ def _cleanup_processing_artifacts(result: dict):
                 shutil.rmtree(folder)
             except OSError:
                 pass
+
+
+def _component_match_scores(result: dict) -> tuple[int | None, int | None]:
+    """Return visual and audio/AV consistency percentages for display.
+
+    Match/consistency is the inverse of the corresponding anomaly indicator.
+    It is intentionally NOT described as biometric identity matching.
+    """
+    verdict = result.get("final_verdict") or {}
+    stored = verdict.get("component_match_percentages") or {}
+    visual = stored.get("visual")
+    audio = stored.get("audio_av")
+
+    agents = result.get("agents") or {}
+    if visual is None:
+        face = agents.get("face_agent") or {}
+        if face.get("status") == "COMPLETED":
+            try:
+                anomaly = max(0.0, min(1.0, float(face.get("anomaly_score", 0.0))))
+                visual = int(round((1.0 - anomaly) * 100))
+            except (TypeError, ValueError):
+                visual = None
+
+    if audio is None:
+        audio_agent = agents.get("audio_agent") or {}
+        if audio_agent.get("status") == "COMPLETED":
+            try:
+                anomaly = max(0.0, min(1.0, float(audio_agent.get("anomaly_score", 0.0))))
+                audio = int(round((1.0 - anomaly) * 100))
+            except (TypeError, ValueError):
+                audio = None
+
+    return visual, audio
+
+
+def _render_match_graph(result: dict):
+    visual_match, audio_match = _component_match_scores(result)
+
+    st.markdown("#### Image & Audio Match / Consistency")
+    metric_a, metric_b = st.columns(2)
+    with metric_a:
+        st.metric(
+            "Image / Visual Match",
+            "N/A" if visual_match is None else f"{visual_match}%",
+            help="Inverse of the visual anomaly indicator. Higher means the visual evidence appeared more internally consistent.",
+        )
+    with metric_b:
+        st.metric(
+            "Audio / AV Match",
+            "N/A" if audio_match is None else f"{audio_match}%",
+            help="Inverse of the audio/AV anomaly indicator. Static images show N/A because no audio is analyzed.",
+        )
+
+    labels = []
+    values = []
+    if visual_match is not None:
+        labels.append("Image / Visual")
+        values.append(visual_match)
+    if audio_match is not None:
+        labels.append("Audio / AV")
+        values.append(audio_match)
+
+    if values:
+        fig = go.Figure(
+            data=[
+                go.Bar(
+                    x=labels,
+                    y=values,
+                    text=[f"{value}%" for value in values],
+                    textposition="outside",
+                    hovertemplate="%{x}: %{y}%<extra></extra>",
+                )
+            ]
+        )
+        fig.update_layout(
+            height=300,
+            margin=dict(l=20, r=20, t=30, b=20),
+            yaxis=dict(title="Match / consistency (%)", range=[0, 105]),
+            xaxis=dict(title="Forensic component"),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f"match_graph_{result.get('session_id', id(result))}")
+
+    st.caption(
+        "Match % is a forensic consistency indicator calculated as 100 - anomaly %. "
+        "It is not biometric identity matching and is not proof of authenticity."
+    )
 
 
 load_css("assets/style.css")
@@ -388,6 +476,8 @@ with tab1:
                         f"Gemini requests: {verdict.get('gemini_requests_used', 'N/A')}"
                     )
 
+                    _render_match_graph(result)
+
                     st.markdown("#### Detailed Findings")
                     face_res = agents.get("face_agent", {})
                     audio_res = agents.get("audio_agent", {})
@@ -395,17 +485,6 @@ with tab1:
                     st.info(f"**Visual [{face_res.get('status','N/A')}]:** {face_res.get('details','N/A')}")
                     st.info(f"**Audio/AV [{audio_res.get('status','N/A')}]:** {audio_res.get('details','N/A')}")
                     st.info(f"**Context [{context_res.get('status','N/A')}]:** {context_res.get('details','N/A')}")
-
-                    with st.expander("Metadata & raw agent output"):
-                        st.json(
-                            {
-                                "session_id": result.get("session_id"),
-                                "media_type": result.get("media_type"),
-                                "frames_sampled": result.get("frames_sampled"),
-                                "metadata": result.get("metadata"),
-                                "agents": agents,
-                            }
-                        )
 
                     report_bytes = result.get("_report_pdf_bytes")
                     if result.get("_report_error"):
@@ -510,18 +589,3 @@ with tab2:
                         )
         else:
             st.info("Run a reverse search from the left panel to show live visual-search candidates here.")
-
-
-st.divider()
-with st.expander("🛠️ System / ClickHouse telemetry"):
-    st.json(
-        {
-            "gemini_configured": bool(Config.GEMINI_API_KEY),
-            "serpapi_configured": bool(Config.SERP_API_KEY),
-            "imgbb_configured": bool(Config.IMGBB_API_KEY),
-            "clickhouse_configured": db_manager.configured,
-            "clickhouse_connected": bool(db_manager.client),
-            "clickhouse_last_error": db_manager.last_error,
-            "tables_when_enabled": ["detection_telemetry", "identity_takedowns"],
-        }
-    )

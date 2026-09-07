@@ -285,8 +285,25 @@ For an image, audio.status MUST be "SKIPPED" and audio.anomaly_score MUST be 0.
                     "Treat this as a screening signal and verify suspicious media with additional evidence."
                 )
 
+        visual_match = None
+        if face.get("status") == "COMPLETED":
+            visual_match = int(round((1.0 - self._score(face.get("anomaly_score"))) * 100))
+
+        audio_match = None
+        if audio.get("status") == "COMPLETED":
+            audio_match = int(round((1.0 - self._score(audio.get("anomaly_score"))) * 100))
+
+        context_match = None
+        if context.get("status") == "COMPLETED":
+            context_match = int(round((1.0 - self._score(context.get("risk_score"))) * 100))
+
         return {
             "overall_manipulation_risk": aggregate_risk,
             "executive_summary": summary,
             "sub_agent_reports": agent_outputs,
+            "component_match_percentages": {
+                "visual": visual_match,
+                "audio_av": audio_match,
+                "context": context_match,
+            },
         }

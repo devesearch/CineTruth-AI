@@ -14,6 +14,7 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from reportlab.graphics.shapes import Drawing, Rect, String
 from reportlab.platypus import (
     HRFlowable,
     Image,
@@ -128,6 +129,64 @@ def _agent_score(agent: dict) -> str:
         return f"{score:.0f}%"
     except (TypeError, ValueError):
         return _safe_text(value)
+
+
+def _component_match_scores(data: dict) -> tuple[int | None, int | None]:
+    verdict = data.get("final_verdict") or {}
+    stored = verdict.get("component_match_percentages") or {}
+    visual = stored.get("visual")
+    audio = stored.get("audio_av")
+    agents = data.get("agents") or {}
+
+    def _derive(agent_key: str):
+        agent = agents.get(agent_key) or {}
+        if agent.get("status") != "COMPLETED":
+            return None
+        try:
+            anomaly = max(0.0, min(1.0, float(agent.get("anomaly_score", 0.0))))
+            return int(round((1.0 - anomaly) * 100))
+        except (TypeError, ValueError):
+            return None
+
+    if visual is None:
+        visual = _derive("face_agent")
+    if audio is None:
+        audio = _derive("audio_agent")
+
+    try:
+        visual = None if visual is None else max(0, min(100, int(round(float(visual)))))
+    except (TypeError, ValueError):
+        visual = None
+    try:
+        audio = None if audio is None else max(0, min(100, int(round(float(audio)))))
+    except (TypeError, ValueError):
+        audio = None
+    return visual, audio
+
+
+def _match_bar_chart(visual: int | None, audio: int | None, width: float = 158 * mm):
+    rows = [("Image / Visual", visual), ("Audio / AV", audio)]
+    height = 38 * mm
+    drawing = Drawing(width, height)
+    label_x = 0
+    bar_x = 34 * mm
+    bar_width = width - bar_x - 16 * mm
+    bar_height = 6 * mm
+    y_positions = [25 * mm, 11 * mm]
+
+    for (label, score), y in zip(rows, y_positions):
+        drawing.add(String(label_x, y + 1.4 * mm, label, fontName="Helvetica-Bold", fontSize=8, fillColor=NAVY))
+        drawing.add(Rect(bar_x, y, bar_width, bar_height, fillColor=colors.HexColor("#E2E8F0"), strokeColor=None))
+        if score is None:
+            drawing.add(String(bar_x + 2 * mm, y + 1.4 * mm, "N/A", fontName="Helvetica", fontSize=8, fillColor=MUTED))
+        else:
+            fill_width = bar_width * (float(score) / 100.0)
+            drawing.add(Rect(bar_x, y, fill_width, bar_height, fillColor=BLUE, strokeColor=None))
+            drawing.add(String(bar_x + bar_width + 2 * mm, y + 1.4 * mm, f"{score}%", fontName="Helvetica-Bold", fontSize=8, fillColor=NAVY))
+
+    drawing.add(String(bar_x, 2.0 * mm, "0%", fontName="Helvetica", fontSize=6.5, fillColor=MUTED))
+    drawing.add(String(bar_x + bar_width - 7 * mm, 2.0 * mm, "100%", fontName="Helvetica", fontSize=6.5, fillColor=MUTED))
+    return drawing
 
 
 def _preview_path(data: dict) -> str | None:
@@ -374,6 +433,38 @@ def generate_report(data: dict, output_filename: str = "CineTruth_Forensic_Repor
     story.append(_p(
         "Interpretation: this score is a screening indicator produced from automated forensic signals. "
         "It is not, by itself, proof that media is authentic or manipulated.",
+        styles["small"],
+    ))
+
+    # Visual/audio consistency percentages and graph.
+    visual_match, audio_match = _component_match_scores(data)
+    story.append(_p("Image & Audio Match / Consistency", styles["h1"]))
+    match_table = Table(
+        [[
+            _p("Image / Visual Match", styles["label"]),
+            _p("N/A" if visual_match is None else f"{visual_match}%", styles["value"]),
+            _p("Audio / AV Match", styles["label"]),
+            _p("N/A" if audio_match is None else f"{audio_match}%", styles["value"]),
+        ]],
+        colWidths=[40 * mm, 29 * mm, 40 * mm, 29 * mm],
+        hAlign="LEFT",
+    )
+    match_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), SOFT_BLUE),
+        ("BOX", (0, 0), (-1, -1), 0.6, BORDER),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, BORDER),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(match_table)
+    story.append(Spacer(1, 2 * mm))
+    story.append(_match_bar_chart(visual_match, audio_match))
+    story.append(_p(
+        "Match/consistency % is calculated as 100 - the corresponding anomaly indicator. "
+        "It describes automated forensic consistency, not biometric identity matching and not proof of authenticity.",
         styles["small"],
     ))
 
